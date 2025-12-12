@@ -89,13 +89,17 @@ update_readme() {
 commit_changes() {
   local manifests_directory="$1"
   local commit_message="$2"
+  # Save and reset IFS to handle array properly
+  local OLD_IFS="$IFS"
+  IFS=$' \t\n'
   local paths_to_add=("${@:3}")
   
   cd "$manifests_directory"
-  
+
   for path in "${paths_to_add[@]}"; do
     git add "$path"
   done
   
+  IFS="$OLD_IFS"
   git commit -s -m "$commit_message"
-} 
+}
