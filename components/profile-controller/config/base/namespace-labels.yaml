@@ -16,3 +16,8 @@ katib.kubeflow.org/metrics-collector-injection: "enabled"
 serving.kubeflow.org/inferenceservice: "enabled"
 pipelines.kubeflow.org/enabled: "true"
 app.kubernetes.io/part-of: "kubeflow-profile"
+istio-injection: ''
+kubeflow.org/ingress: enabled
+istio.io/dataplane-mode: ambient
+istio.io/use-waypoint: waypoint
+istio.io/ingress-use-waypoint: "true"

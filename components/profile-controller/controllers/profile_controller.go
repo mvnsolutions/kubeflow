@@ -32,7 +32,11 @@ import (
 	"gopkg.in/fsnotify.v1"
 	"gopkg.in/yaml.v2"
 	istioSecurity "istio.io/api/security/v1beta1"
+	istioTypes "istio.io/api/type/v1beta1"
 	istioSecurityClient "istio.io/client-go/pkg/apis/security/v1beta1"
+	"istio.io/istio/pkg/config/constants"
+	"istio.io/istio/pkg/config/protocol"
+	"istio.io/istio/pkg/config/schema/gvk"
 	corev1 "k8s.io/api/core/v1"
 	rbacv1 "k8s.io/api/rbac/v1"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
@@ -46,9 +50,11 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/handler"
 	"sigs.k8s.io/controller-runtime/pkg/reconcile"
 	"sigs.k8s.io/controller-runtime/pkg/source"
+	gateway "sigs.k8s.io/gateway-api/apis/v1"
 )
 
 const AUTHZPOLICYISTIO = "ns-owner-access-istio"
+const WAYPOINTGTWISTIO = "waypoint"
 
 // Istio constants
 const ISTIOALLOWALL = "allow-all"
@@ -205,6 +211,14 @@ func (r *ProfileReconciler) Reconcile(ctx context.Context, request ctrl.Request)
 		return reconcile.Result{}, err
 	}
 
+	// Update Istio Waypoint Gateway
+	// Create Istio Waypoint Gateway in target namespace
+	if err = r.updateIstioWaypointGateway(instance); err != nil {
+		logger.Error(err, "error Updating Istio Waypoint Gateway", "namespace", instance.Name)
+		IncRequestErrorCounter("error updating Istio Waypoint Gateway", SEVERITY_MAJOR)
+		return reconcile.Result{}, err
+	}
+
 	// Update service accounts
 	// Create service account "default-editor" in target namespace.
 	// "default-editor" would have kubeflowEdit permission: edit all resources in target namespace except rbac.
@@ -347,10 +361,10 @@ func (r *ProfileReconciler) appendErrorConditionAndReturn(ctx context.Context, i
 }
 
 // mapEventToRequest maps an event to reconcile requests for all Profiles
-func (r *ProfileReconciler) mapEventToRequest(o client.Object) []reconcile.Request {
+func (r *ProfileReconciler) mapEventToRequest(ctx context.Context, o client.Object) []reconcile.Request {
 	req := []reconcile.Request{}
 	profileList := &profilev1.ProfileList{}
-	err := r.Client.List(context.TODO(), profileList)
+	err := r.Client.List(ctx, profileList)
 	if err != nil {
 		r.Log.Error(err, "Failed to list profiles in order to trigger reconciliation")
 		return req
@@ -404,9 +418,9 @@ func (r *ProfileReconciler) SetupWithManager(mgr ctrl.Manager) error {
 		Owns(&istioSecurityClient.AuthorizationPolicy{}).
 		Owns(&corev1.ServiceAccount{}).
 		Owns(&rbacv1.RoleBinding{}).
-		Watches(
-			&source.Channel{Source: events},
-			handler.EnqueueRequestsFromMapFunc(r.mapEventToRequest),
+		Owns(&gateway.Gateway{}).
+		WatchesRawSource(
+			source.Channel(events, handler.EnqueueRequestsFromMapFunc(r.mapEventToRequest)),
 		)
 
 	err = c.Complete(r)
@@ -429,10 +443,17 @@ func (r *ProfileReconciler) getAuthorizationPolicy(profileIns *profilev1.Profile
 		"KFP_UI_PRINCIPAL",
 		"cluster.local/ns/kubeflow/sa/ml-pipeline-ui")
 
+	waypointPrincipal := "cluster.local/ns/" + profileIns.Name + "/sa/" + WAYPOINTGTWISTIO
+
 	return istioSecurity.AuthorizationPolicy{
 		Action: istioSecurity.AuthorizationPolicy_ALLOW,
 		// Empty selector == match all workloads in namespace
 		Selector: nil,
+		TargetRef: &istioTypes.PolicyTargetReference{
+			Group: "gateway.networking.k8s.io",
+			Kind:  "Gateway",
+			Name:  "waypoint",
+		},
 		Rules: []*istioSecurity.Rule{
 			{
 				When: []*istioSecurity.Condition{
@@ -450,6 +471,7 @@ func (r *ProfileReconciler) getAuthorizationPolicy(profileIns *profilev1.Profile
 						Principals: []string{
 							istioIGWPrincipal,
 							kfpUIPrincipal,
+							waypointPrincipal,
 						},
 					},
 				}},
@@ -547,6 +569,64 @@ func (r *ProfileReconciler) updateIstioAuthorizationPolicy(profileIns *profilev1
 			logger.Info("Updating Istio AuthorizationPolicy", "namespace", istioAuth.ObjectMeta.Namespace,
 				"name", istioAuth.ObjectMeta.Name)
 			err = r.Update(context.TODO(), foundAuthorizationPolicy)
+			if err != nil {
+				return err
+			}
+		}
+	}
+	return nil
+}
+
+func (r *ProfileReconciler) updateIstioWaypointGateway(profileIns *profilev1.Profile) error {
+	logger := r.Log.WithValues("profile", profileIns.Name)
+
+	gw := &gateway.Gateway{
+		TypeMeta: metav1.TypeMeta{
+			Kind:       gvk.KubernetesGateway.Kind,
+			APIVersion: gvk.KubernetesGateway.GroupVersion(),
+		},
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      WAYPOINTGTWISTIO,
+			Namespace: profileIns.Name,
+		},
+		Spec: gateway.GatewaySpec{
+			GatewayClassName: constants.WaypointGatewayClassName,
+			Listeners: []gateway.Listener{{
+				Name:     "mesh",
+				Port:     15008,
+				Protocol: gateway.ProtocolType(protocol.HBONE),
+			}},
+		},
+	}
+	if err := controllerutil.SetControllerReference(profileIns, gw, r.Scheme); err != nil {
+		return err
+	}
+	foundGW := &gateway.Gateway{}
+	err := r.Get(
+		context.TODO(),
+		types.NamespacedName{
+			Name:      gw.ObjectMeta.Name,
+			Namespace: gw.ObjectMeta.Namespace,
+		},
+		foundGW,
+	)
+	if err != nil {
+		if apierrors.IsNotFound(err) {
+			logger.Info("Creating Istio Waypoint Gateway", "namespace", gw.ObjectMeta.Namespace,
+				"name", gw.ObjectMeta.Name)
+			err = r.Create(context.TODO(), gw)
+			if err != nil {
+				return err
+			}
+		} else {
+			return err
+		}
+	} else {
+		if !reflect.DeepEqual(*gw.Spec.DeepCopy(), *foundGW.Spec.DeepCopy()) {
+			foundGW.Spec = *gw.Spec.DeepCopy()
+			logger.Info("Updating Istio Waypoint Gateway", "namespace", gw.ObjectMeta.Namespace,
+				"name", gw.ObjectMeta.Name)
+			err = r.Update(context.TODO(), foundGW)
 			if err != nil {
 				return err
 			}

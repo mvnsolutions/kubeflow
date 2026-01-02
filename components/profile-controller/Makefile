@@ -1,10 +1,10 @@
 # Image URL to use all building/pushing image targets
-IMG ?= ghcr.io/kubeflow/kubeflow/profile-controller
+IMG ?= ghcr.io/mvnsolutions/kubeflow/profile-controller
 TAG ?= $(shell git describe --tags --always --dirty)
 ARCH ?= linux/amd64
 
 # ENVTEST_K8S_VERSION refers to the version of kubebuilder assets to be downloaded by envtest binary.
-ENVTEST_K8S_VERSION = 1.23
+ENVTEST_K8S_VERSION = 1.33
 
 # Get the currently used golang install path (in GOPATH/bin, unless GOBIN is set)
 ifeq (,$(shell go env GOBIN))
@@ -119,6 +119,15 @@ test-overlays: manifests ## Deploy controller to the K8s cluster specified in ~/
 	sed -i'' -e 's@newTag: .*@newTag: '"${TAG}"'@' ./config/base/kustomization.yaml
 	$(KUSTOMIZE) build config/overlays/kubeflow | kubectl apply -f -
 
+.PHONY: test-ambient
+test-ambient: manifests ## Deploy controller to the K8s cluster specified in ~/.kube/config.
+	@echo IMG=${IMG}
+	@echo TAG=${TAG}
+	sed -i'' -e 's@newName: .*@newName: '"${IMG}"'@' ./config/base/kustomization.yaml
+	sed -i'' -e 's@newTag: .*@newTag: '"${TAG}"'@' ./config/base/kustomization.yaml
+	$(KUSTOMIZE) build config/overlays/kubeflow-ambient | kubectl apply -f -
+
+
 .PHONY: undeploy
 undeploy: ## Undeploy controller from the K8s cluster specified in ~/.kube/config. Call with ignore-not-found=true to ignore resource not found errors during deletion.
 	$(KUSTOMIZE) build config/base | kubectl delete --ignore-not-found=$(ignore-not-found) -f -
@@ -134,11 +143,11 @@ $(LOCALBIN):
 KUSTOMIZE ?= $(LOCALBIN)/kustomize
 CONTROLLER_GEN ?= $(LOCALBIN)/controller-gen
 ENVTEST ?= $(LOCALBIN)/setup-envtest
-ENVTEST_VERSION?=release-0.12
+ENVTEST_VERSION?=release-0.22
 
 ## Tool Versions
-KUSTOMIZE_VERSION ?= v3.2.0
-CONTROLLER_TOOLS_VERSION ?= v0.8.0
+KUSTOMIZE_VERSION ?= v5.8.0
+CONTROLLER_TOOLS_VERSION ?= v0.20.0
 
 KUSTOMIZE_INSTALL_SCRIPT ?= "https://raw.githubusercontent.com/kubernetes-sigs/kustomize/master/hack/install_kustomize.sh"
 .PHONY: kustomize
